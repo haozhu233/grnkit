@@ -1,0 +1,31 @@
+[project]
+name = "grnkit"
+description = "A kit for running benchmarks on inferencing gene regulatory networks."
+requires-python = ">=3.7"
+license = {file = "LICENSE"}
+version = "0.0.1"
+authors = [
+    { name = "Hao Zhu" }
+]
+maintainers = [
+    { name = "Hao Zhu", email = "haozhu233@gmail.com" }
+]
+
+dependencies = [
+    "numpy>=1.16.5",
+    "pandas>=1.1.1",
+    "scipy>1.4",
+    "h5py>=3",
+    "natsort",
+    "packaging>=20",
+    "anndata",
+    "scikit-learn",
+    "networkx"
+]
+
+[build-system]
+build-backend = "flit_core.buildapi"
+requires = ["flit_core >=3.4,<4", "setuptools_scm"]
+
+[project.urls]
+Home = "https://github.com/haozhu233/grnkit"
