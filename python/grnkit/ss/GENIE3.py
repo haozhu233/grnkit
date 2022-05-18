@@ -7,6 +7,7 @@ from numpy import *
 import time
 from operator import itemgetter
 from multiprocessing import Pool
+from tqdm import tqdm
 
 def compute_feature_importances(estimator):
     if isinstance(estimator, BaseDecisionTree):
@@ -124,19 +125,16 @@ def GENIE3(expr_data,gene_names=None,regulators='all',tree_method='RF',K='sqrt',
         input_data = list()
         for i in range(ngenes):
             input_data.append( [expr_data,i,input_idx,tree_method,K,ntrees] )
-
-        pool = Pool(nthreads)
-        alloutput = pool.map(wr_GENIE3_single, input_data)
+        
+        with Pool(nthreads) as p:
+            alloutput = p.map(wr_GENIE3_single, input_data)
     
         for (i,vi) in alloutput:
             VIM[i,:] = vi
 
     else:
         print('running single threaded jobs')
-        for i in range(ngenes):
-            if verbose>0:
-                print('Gene %d/%d...' % (i+1,ngenes))
-            
+        for i in tqdm(range(ngenes), disable=(verbose==0)): 
             vi = GENIE3_single(expr_data,i,input_idx,tree_method,K,ntrees)
             VIM[i,:] = vi
 

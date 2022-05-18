@@ -1,172 +1,141 @@
+import urllib
+import gzip
+import os
+import shutil
 import numpy as np
+import pandas as pd
+import anndata as ad
+from collections import defaultdict
 from itertools import product
-import os.path as osp
+from pathlib import Path
+import pickle
 
-class GRNDataset(object):
-    r""" A generic data class for single shot non-single-cell data
+PKG_PATH = Path(__file__).parent
+
+# Load existing network data. 
+def load_network(species, benchmark):
+    return np.genfromtxt(
+        PKG_PATH / 'data' / ('{}_{}.tsv'.format(species, benchmark)), 
+        dtype=str)
+
+# General util functions to download raw data from GEO. 
+def get_geo_url(gse_id, file_name):
+    geo_url = 'https://www.ncbi.nlm.nih.gov/geo/download/?'
+    param = {'acc': gse_id, 'format':'file', 'file': file_name}
+    return geo_url + urllib.parse.urlencode(param, quote_via=urllib.parse.quote)
+
+def download_geo(dir_path, gse_id, file_name):
+    print('Downloading file from ' + gse_id, '...')
+    download_url = get_geo_url(gse_id, file_name)
+    local_gz_path = os.path.join(dir_path, file_name)
+    local_file_path = os.path.join(dir_path, file_name.rstrip('.gz'))
+                                   
+    urllib.request.urlretrieve(download_url, local_gz_path)
     
-    Parameters
-    ----------
-    expression_data : [ndarray, list of ndarray]
-    number_of_genes: int
-        number of all genes
-    gene_names: list of strings, optional
-        List of gene names
-    regulator_genes: list of strings, optional
-        List of regulator gene names
-    gold_standard: list of [regulator gene, target gene, score], optional
-        Gold standard if available
-    """
-    def __init__(self, expression_data, 
-                 number_of_genes, number_of_samples,
-                 gene_names=None, regulator_genes=None, 
-                 gold_standard=None):
-        # Check gene names
-        if gene_names is None:
-            gene_names = ['G' + str(i+1) for i in range(number_of_genes)]
-        gene_idx = {x: i for (i, x) in enumerate(gene_names)}
-        if len(gene_idx) != len(gene_names):
-            raise ValueError('duplicated gene names are not allowed')
-        
-        # Convert regulator_genes to list of indexes
-        if regulator_genes is None:
-            regulator_genes = [i for i in range(number_of_genes)]
-        else:
-            regulator_genes = [gene_idx[reg_g] for reg_g in regulator_genes]
+    with gzip.open(local_gz_path, 'rb') as f_in:
+        with open(local_file_path, 'wb') as f_out:
+            shutil.copyfileobj(f_in, f_out)
             
-        self.expression_data = expression_data
-        self.number_of_genes = number_of_genes
-        self.number_of_samples = number_of_samples
-        self.gene_names = gene_names
-        self.gene_idx = gene_idx
-        self.regulator_genes = regulator_genes
+    return local_file_path
+
+def build_initial_ground_truth(g2g, species, bm):
+    original_bm_links = load_network(species, bm)
+    links = []
+    for link in original_bm_links:
+        if link[0] in g2g and link[1] in g2g:
+            for gene_id_pair in product(g2g[link[0]], g2g[link[1]]):
+                    links.append(gene_id_pair)
+    return links
+
+
+def update_gene_meta(dt):
+    if len(dt.uns['gene_dict']) != dt.n_vars:
+        dt.uns['gene_dict'] = {
+            k: dt.uns['gene_dict'][k] for k in dt.var_names}
+        update_gene_name2id(dt)
+
+def update_gene_name2id(dt):
+    name2id = defaultdict(list)
+    for gene_id in dt.uns['gene_dict']:
+        name2id[dt.uns['gene_dict'][gene_id]['gene_name']].append(gene_id)
+    dt.uns['gene_name2id'] = name2id
+
+def get_ground_truth(dt, bm):
+    update_gene_meta(dt)
+    updated_links = []
+    g2g = dt.uns['gene_name2id']
+    for link in dt.uns[bm]:
+        if link[0] in g2g and link[1] in g2g:
+            for gene_id_pair in product(g2g[link[0]], g2g[link[1]]):
+                updated_links.append(gene_id_pair)
+    return updated_links
+
+# load benchmarks
+def load_gse_70499(dir_path='', force_reload=False):
+    gse_id = 'GSE70499'
+    file_name = 'GSE70499_FINAL_master_list_of_genes_counts_MIN.sense.George_WT_v_KO_timecourse.txt.gz'
+    dir_path = os.path.join(dir_path, gse_id)
+    processed_file_path = os.path.join(dir_path, gse_id+'.pkl')
+    
+    if not os.path.exists(dir_path):
+        os.mkdir(dir_path)
         
-        # Generate gold standard link dictionary
-        interaction_dict = {
-            '|'.join(x):i for i, x in enumerate(product(gene_names, gene_names))
+    if os.path.exists(processed_file_path) and force_reload==False:
+        print('Loading from processed file...')
+        with open(processed_file_path, 'rb') as f:
+            dt = pickle.load(f)
+        return dt
+    
+    raw_file = download_geo(dir_path, gse_id, file_name)
+    
+    print('Processing...')
+    raw = pd.read_csv(raw_file, sep='\t')
+    
+    raw.id = raw.id.str.replace('gene:', '')
+    raw.geneSymbol = raw.geneSymbol.str.upper()
+
+    gene_dict = {}
+    for i in range(raw.shape[0]):
+        gene_dict[raw.id[i]] = {
+            'gene_name': raw.geneSymbol[i],
+            'geneCoordinate': raw.geneCoordinate[i],
         }
-        gold_standard_adj_list = [0] * (number_of_genes ** 2)
-        for (g1, g2, x) in gold_standard:
-            if x != 0:
-                gold_standard_adj_list[interaction_dict[g1 + '|' + g2]] = x
-        self.gold_standard = gold_standard_adj_list
-        self.interaction_dict = interaction_dict
-        
-    def gold_standard_is_available(self):
-        return (self.gold_standard is not None)
+
+    del raw['geneSymbol']
+    del raw['geneCoordinate']
+
+    dt = raw.set_index('id').transpose().reset_index()
+    dt_meta_ids = dt['index']
+    dt_meta = dt_meta_ids.str.split('_', expand=True)
+    del dt['index']
+    dt_array = dt.to_numpy()
+
+    ad_dt = ad.AnnData(dt_array, dtype=int)
+    ad_dt.var_names = np.array(dt.columns, dtype=str)
+    ad_dt.obs_names = dt_meta[2].to_numpy()
+    ad_dt.obs['genotype'] = pd.Categorical(dt_meta[0])
+    ad_dt.obs['timepoint'] = pd.Categorical(
+        dt_meta[1].str.replace('ZT', '').to_numpy(dtype=int)
+    )
+    ad_dt.uns['gene_dict'] = gene_dict
+    update_gene_name2id(ad_dt)
     
-class SingleShotGRNDataset(GRNDataset):
-    r"""A generic data class for single shot non-single-cell data (2D)
+    print('Adding benchmarks...')
+    ad_dt.uns['benchmark_RN'] = build_initial_ground_truth(
+        ad_dt.uns['gene_name2id'], 'mouse', 'RN'
+    )
+    ad_dt.uns['benchmark_TRRUST'] = build_initial_ground_truth(
+        ad_dt.uns['gene_name2id'], 'mouse', 'TRRUST'
+    )
+    ad_dt.uns['benchmark_BEELINE'] = build_initial_ground_truth(
+        ad_dt.uns['gene_name2id'], 'mouse', 'BEELINE'
+    )
+    ad_dt.uns['benchmark_STRING'] = build_initial_ground_truth(
+        ad_dt.uns['gene_name2id'], 'mouse', 'STRING'
+    )
+
+    with open(processed_file_path, 'wb') as f:
+        pickle.dump(ad_dt, f)
     
-    Parameters
-    ----------
-    expression_data : ndarray
-        Expression data array where rows are samples and columns are genes. Shape = N x D.
-    """
-    
-    def __init__(self, expression_data, 
-                 gene_names=None, regulator_genes=None, gold_standard=None):
-        number_of_genes = expression_data.shape[1]
-        super(SingleShotGRNDataset, self).__init__(
-            expression_data = expression_data, 
-            number_of_genes = number_of_genes,
-            number_of_samples = 1,
-            gene_names = gene_names, 
-            regulator_genes = regulator_genes, 
-            gold_standard = gold_standard
-        )
-        
-class TimeseriesGRNDataset(GRNDataset):
-    r"""A generic data class for timeseries non-single-cell data (3D)
-    
-    Parameters
-    ----------
-    expression_data : list of ndarray
-        List of expression data. Each element is a ndarray from a single 
-        timeseries sample in the shape of T x (D+1). The first dimension is for
-        timestamps in interger format. All arrays need to have the same 
-        dimension on gene (D). 
-    """
-    
-    def __init__(self, expression_data, 
-                 gene_names=None, regulator_genes=None, gold_standard=None):
-        time_stamps = []
-        for i in range(len(expression_data)):
-            time_stamps.append(expression_data[i][:, 0])
-            expression_data[i] = expression_data[i][:, 1:]
-            
-        number_of_samples = len(expression_data)
-        number_of_genes = expression_data[0].shape[1]
-            
-        super(TimeseriesGRNDataset, self).__init__(
-            expression_data = expression_data, 
-            number_of_genes = number_of_genes,
-            number_of_samples = number_of_samples, 
-            gene_names = gene_names, 
-            regulator_genes = regulator_genes, 
-            gold_standard = gold_standard
-        )
-        self.time_stamps = time_stamps
-        
-class Dream4TimeseriesDataset(TimeseriesGRNDataset):
-    def __init__(self, size=10, network=1):
-        if size == 10:
-            n_ts = 5
-        elif size == 100:
-            n_ts = 10
-            
-        data_dir_path = osp.join('..', 'data', 'dream4')
-        dataset_name = 'insilico_size' + str(size) + '_' + str(network)
-        
-        expression_file_path = osp.join(
-            data_dir_path, 'Size ' + str(size), 'DREAM4 training data',
-            dataset_name, dataset_name + '_timeseries.tsv'
-        )
-        expression_data = np.loadtxt(expression_file_path, skiprows=1)
-        expression_data = np.split(expression_data, n_ts)
-        
-        goldstandard_file_path = osp.join(
-            data_dir_path, 'Size ' + str(size), 'DREAM4 gold standards',
-            dataset_name + '_goldstandard.tsv'
-        )
-        goldstandard = np.loadtxt(goldstandard_file_path, skiprows=1, dtype=str)
-        goldstandard = [[x[0], x[1], 1] for x in goldstandard if x[2] == '1']
-        
-        super(Dream4TimeseriesDataset, self).__init__(
-            expression_data = expression_data, 
-            gold_standard = goldstandard
-        )
-        
-        self.benchmark_name = 'Dream'
-        self.n_ts = n_ts
-        self.size = size
-        self.network_id = network
-        
-class Dream4MultifactorialDataset(SingleShotGRNDataset):
-    def __init__(self, network=1):
-        data_dir_path = osp.join('..', 'data', 'dream4')
-        dataset_name = 'insilico_size100_' + str(network)
-        
-        expression_file_path = osp.join(
-            data_dir_path, 'Size 100 multifactorial', 
-            'DREAM4 training data',
-            dataset_name + '_multifactorial.tsv'
-        )
-        expression_data = np.loadtxt(expression_file_path, skiprows=1)
-        
-        goldstandard_file_path = osp.join(
-            data_dir_path, 'Size 100 multifactorial',  
-            'DREAM4 gold standards',
-            'insilico_size100_multifactorial_' + str(network) + 
-            '_goldstandard.tsv'
-        )
-        goldstandard = np.loadtxt(goldstandard_file_path, skiprows=1, dtype=str)
-        goldstandard = [[x[0], x[1], 1] for x in goldstandard if x[2] == '1']
-        
-        super(Dream4MultifactorialDataset, self).__init__(
-            expression_data = expression_data, 
-            gold_standard = goldstandard
-        )
-        
-        self.benchmark_name = 'Dream'
-        self.network_id = network
+    print('Complete!')
+    return ad_dt

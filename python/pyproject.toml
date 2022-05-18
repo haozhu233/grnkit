@@ -11,8 +11,8 @@ maintainers = [
     { name = "Hao Zhu", email = "haozhu233@gmail.com" }
 ]
 license = {file = "LICENSE"}
-description = "A kit for running benchmarks on inferencing gene regulatory networks."
-version = "0.0.1"
+description = "A kit for running benchmarks on inferencing gene regulatory networks. (under construction)"
+version = "0.0.2"
 requires-python = ">=3.7"
 classifiers = ["License :: OSI Approved :: GNU General Public License v3 or later (GPLv3+)"]
 
